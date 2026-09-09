@@ -1,0 +1,15 @@
+.env
+.env.*
+!.env.example
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.log
+.DS_Store
+
+# Local secrets are never deliverables
+*TOKEN*.txt
+*KEY*.txt
+secrets/
