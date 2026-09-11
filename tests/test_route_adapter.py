@@ -32,6 +32,16 @@ class Planning:
         return TravelOption('a', 'b', 'WALK', 8, steps=('Идите прямо',))
 
 
+class Saved:
+    repository = None
+    def __init__(self): self.calls = 0
+    def autosave(self, session, owner):
+        self.calls += 1
+        return Obj(summary=Obj(name='Saved route'))
+    def list(self, owner, page=0): return ()
+    def count(self, owner): return 0
+
+
 class RouteAdapterTests(unittest.IsolatedAsyncioTestCase):
     def update(self, data=None):
         return Obj(effective_user=Obj(id=1), effective_chat=Obj(id=1, type='private'),
@@ -70,6 +80,16 @@ class RouteAdapterTests(unittest.IsolatedAsyncioTestCase):
         await adapter.callback(self.update(adapter.dialog.token((1, 1), 'calculate')), None)
         await adapter.start(self.update(), None)
         self.assertNotIn((1, 1), adapter.planning_tasks)
+
+    async def test_successful_calculation_is_autosaved_once(self):
+        planning, saved = Planning(), Saved()
+        adapter = Adapter(Dialog(Source()), planning_service=planning, saved_service=saved)
+        self.addAsyncCleanup(adapter.close)
+        session = adapter.dialog.store.start((1, 1)); session.stage = 'plan_ready'
+        await adapter.callback(self.update(adapter.dialog.token((1, 1), 'calculate')), None)
+        await adapter.planning_tasks[(1, 1)]
+        self.assertEqual(saved.calls, 1)
+        self.assertIn('Saved route', session.notice)
 
 
 if __name__ == '__main__':

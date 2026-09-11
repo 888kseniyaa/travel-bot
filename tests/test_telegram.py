@@ -76,6 +76,28 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(a.dialog.store.get((10, 1)))
         self.assertIn('личном чате', u.effective_message.reply_text.call_args.kwargs['text'])
 
+    async def test_external_map_button_uses_url_not_callback_data(self):
+        a = Adapter()
+        update = self.update()
+        url = 'https://www.google.com/maps/dir/?api=1&origin=A&destination=B'
+        await a.send(update, 'Map', [[('Открыть маршрут в Google Maps', url)]])
+        markup = update.effective_message.reply_text.call_args.kwargs['reply_markup']
+        button = markup.inline_keyboard[0][0]
+        self.assertEqual(button.url, url)
+        self.assertIsNone(button.callback_data)
+
+    async def test_routes_command_opens_saved_routes_without_losing_session(self):
+        class Saved:
+            repository = None
+            def list(self, owner, page=0): return ()
+            def count(self, owner): return 0
+        adapter = Adapter(saved_service=Saved())
+        adapter.dialog.store.start((10, 1)).selected = {'draft': 45}
+        update = self.update('/routes')
+        await adapter.routes(update, None)
+        self.assertIn('Мои маршруты', update.effective_message.reply_text.call_args.kwargs['text'])
+        self.assertEqual(adapter.dialog.store.get((10, 1)).selected, {'draft': 45})
+
     def test_application_builds_without_network(self):
         app = build_application('123456:TEST_ONLY_NOT_A_REAL_TOKEN')
         self.assertEqual(app.concurrent_updates, 1)

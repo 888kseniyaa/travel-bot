@@ -4,6 +4,9 @@ from datetime import date, datetime, time, timedelta
 from .places import CATEGORIES, MINUTES, DemoSource, PlaceSource
 from .state import Store
 from .day import DayParameters, LunchBreak, ValidationError
+from .route_map import (
+    RouteMapError, build_route_map_link, build_selected_route_map_link,
+)
 
 class InputError(ValueError):
     pass
@@ -13,6 +16,7 @@ class Dialog:
         self.source = source if source is not None else DemoSource()
         self.store = store if store is not None else Store()
         self.today_provider = today_provider or date.today
+        self.saved_flow = None
 
     @property
     def real(self):
@@ -52,6 +56,8 @@ class Dialog:
             if not query or len(query) > 200:
                 raise InputError('Введите адрес или название точки (до 200 символов).')
             kind = 'endpoint_start' if s.stage == 'start_query' else 'endpoint_finish'
+            if s.stage == 'start_query': s.start_query = query
+            else: s.finish_query = query
             s.operation, s.stage = (kind, query, object()), 'searching'
         elif s.stage == 'walking_input':
             raw = text.strip()
@@ -67,6 +73,7 @@ class Dialog:
             text = ' '.join(text.split())
             if not text or len(text) > 200:
                 raise InputError('Введите город и страну или район, город и страну (до 200 символов).')
+            s.geography_query = text
             s.operation = ('geo', text, object())
             s.stage, s.notice = 'searching', ''
         elif s.stage == 'geo':
@@ -80,7 +87,7 @@ class Dialog:
             if not re.fullmatch(r'[0-9]{1,6}', raw) or int(raw) == 0:
                 raise InputError('Введите целое число минут от 1 до 999999, например 90. Попробуйте ещё раз.')
             s.selected[s.pending] = int(raw)
-            s.pending, s.stage, s.plan = None, 'places', None
+            s.pending, s.stage, s.plan, s.route_link_fallback = None, 'places', None, False
         else:
             raise InputError('Используйте кнопки ниже. /resume — текущий экран, /start — новый подбор.')
         s.revision += 1
@@ -97,12 +104,16 @@ class Dialog:
 
     def click(self, key, data):
         s = self.require(key)
+        if self.saved_flow and s.stage.startswith('saved_'):
+            return self.saved_flow.click(self, key, key[1], data)
         prefix = f'{s.session}:{s.revision}:'
         if not isinstance(data, str) or not data.startswith(prefix):
             raise InputError('Эта кнопка устарела или принадлежит другому подбору. Используйте /resume.')
         action = data[len(prefix):]
         op, _, value = action.partition(':')
         if action == 'new': return self.start(key)
+        if action == 'routes' and self.saved_flow:
+            return self.saved_flow.enter(self, key, key[1])
         if action == 'plan' and s.stage == 'confirmed':
             if len(s.selected) > 6:
                 raise InputError('Для одного расчёта выберите не более шести мест.')
@@ -170,6 +181,7 @@ class Dialog:
                 if value in s.selected: del s.selected[value]
                 else: s.selected[value] = MINUTES[place.category]
                 s.plan = None
+                s.route_link_fallback = False
             else:
                 if value not in s.selected: raise InputError('Сначала выберите это место.')
                 s.pending, s.stage = value, 'duration'
@@ -188,9 +200,13 @@ class Dialog:
 
     def view(self, key):
         s = self.require(key)
+        if self.saved_flow and s.stage.startswith('saved_'):
+            return self.saved_flow.view(self, key, key[1])
         rows = []
         def button(label, action):
             rows.append([(label[:60], self.token(key, action))])
+        def link_button(label, url):
+            rows.append([(label[:60], url)])
         def attribution(place):
             if place.maps_url: lines.append('Google Maps: ' + place.maps_url)
             lines.extend(place.attributions)
@@ -271,6 +287,18 @@ class Dialog:
             lines += [f'Переезды: {plan.total_travel_min} мин. Ходьба: {plan.total_walking_min} мин.',
                       *('⚠️ ' + warning for warning in plan.warnings),
                       'Расписание оценочное; проверьте актуальные часы и предупреждения Google Maps.']
+            try:
+                if not s.start_endpoint:
+                    raise RouteMapError('Ссылка на карту недоступна: стартовая точка не определена.')
+                route_map = build_route_map_link(s.start_endpoint, s.finish_endpoint,
+                                                 plan, s.places)
+            except RouteMapError as error:
+                lines.append(str(error))
+            else:
+                lines.append('Google Maps построит собственный вариант по переданным точкам; путь, время и способы перемещения могут отличаться от расчёта бота.')
+                if route_map.mobile_waypoint_warning:
+                    lines.append('⚠️ На некоторых мобильных устройствах часть промежуточных точек может не открыться.')
+                link_button('Открыть маршрут в Google Maps', route_map.url)
             if s.detail_text: lines += ['', 'Подробности перехода:', s.detail_text]
             button('Пересчитать', 'calculate')
             button('Изменить параметры дня', 'edit_plan_parameters')
@@ -308,6 +336,17 @@ class Dialog:
                         attribution(p)
                 lines += [f'Итого посещения: {sum(s.selected.values())} мин.',
                           'Дорога не включена в сумму. Маршрут пока не рассчитан.']
+                if s.route_link_fallback and s.start_endpoint:
+                    try:
+                        route_map = build_selected_route_map_link(
+                            s.start_endpoint, s.finish_endpoint, tuple(s.selected), s.places)
+                    except RouteMapError as error:
+                        lines.append(str(error))
+                    else:
+                        lines.append('⚠️ Google Maps получил места в порядке выбора; маршрут и расписание не рассчитаны ботом.')
+                        if route_map.mobile_waypoint_warning:
+                            lines.append('⚠️ На некоторых мобильных устройствах часть промежуточных точек может не открыться.')
+                        link_button('Открыть выбранные места в Google Maps', route_map.url)
                 button('Вернуться к редактированию', 'edit')
                 button('Спланировать день', 'plan')
             else:
@@ -335,5 +374,7 @@ class Dialog:
                 if self.real:
                     button('Повторить поиск (выбор сохранится)', 'refresh')
                     button('Другая география (сброс выбора)', 'geography')
+        if self.saved_flow and s.stage in ('geo', 'planned'):
+            button('Мои маршруты', 'routes')
         button('Новый подбор', 'new')
         return '\n'.join(lines), rows

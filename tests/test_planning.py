@@ -6,7 +6,7 @@ from travel_bot.day import Coordinate, DayParameters, Endpoint, TravelOption
 from travel_bot.dialog import Dialog
 from travel_bot.places import Place
 from travel_bot.planning import PlanningService, calculation_fingerprint
-from travel_bot.routes import PlanningBudget, RouteUnavailable, TravelMatrix
+from travel_bot.routes import PlanningBudget, RouteUnavailable, RoutesError, TravelMatrix
 
 
 class Source:
@@ -108,6 +108,17 @@ class PlanningTests(unittest.IsolatedAsyncioTestCase):
             dialog, key, session, calculation_fingerprint(session))
         self.assertIsNotNone(outcome)
         self.assertEqual([leg.option.mode for leg in outcome.legs], ['WALK', 'WALK'])
+
+    async def test_failed_calculation_enables_selected_order_map_link(self):
+        class BrokenRoutes(Routes):
+            async def matrices(self, *args):
+                raise RoutesError('Routes API unavailable')
+        dialog, key, session = configured_dialog()
+        outcome = await PlanningService(Source(), BrokenRoutes()).calculate(
+            dialog, key, session, calculation_fingerprint(session))
+        self.assertIsNone(outcome)
+        self.assertTrue(session.route_link_fallback)
+        self.assertEqual(session.stage, 'confirmed')
 
 
 if __name__ == '__main__':

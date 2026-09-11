@@ -29,6 +29,7 @@ class Selection:
     finish_endpoint: Optional[Endpoint] = None
     endpoint_candidates: tuple[Endpoint, ...] = ()
     plan: Optional[DayPlan] = None
+    route_link_fallback: bool = False
     planning_operation: Optional[object] = None
     planning_fingerprint: str = ''
     planning_budget: Optional[object] = None
@@ -39,6 +40,16 @@ class Selection:
     draft_lunch_start: Optional[time] = None
     detail_text: str = ''
     detail_request: Optional[int] = None
+    geography_query: str = ''
+    start_query: str = ''
+    finish_query: str = ''
+    saved_return_stage: Optional[str] = None
+    saved_page: int = 0
+    saved_summaries: tuple = ()
+    saved_current: Optional[object] = None
+    saved_opened: Optional[object] = None
+    saved_open_request: Optional[tuple] = None
+    saved_delete_all_count: int = 0
     expires: float = field(default_factory=lambda: monotonic() + 1800)
 
 class Store:

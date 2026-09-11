@@ -43,6 +43,7 @@ class PlanningService:
         session.planning_operation = operation
         session.stage = 'planning'
         session.notice = ''
+        session.route_link_fallback = False
         try:
             if calculation_fingerprint(session) != fingerprint:
                 return None
@@ -115,16 +116,19 @@ class PlanningService:
             session.planning_budget = budget
             session.stage = 'planned'
             session.notice = ''
+            session.route_link_fallback = False
             return session.plan
         except RoutesError as error:
             if _still_current(dialog, key, session, operation, fingerprint):
                 session.notice = str(error)
                 session.stage = 'confirmed'
+                session.route_link_fallback = True
             return None
         except Exception:
             if _still_current(dialog, key, session, operation, fingerprint):
                 session.notice = 'Расчёт временно недоступен. Выбор и параметры сохранены.'
                 session.stage = 'confirmed'
+                session.route_link_fallback = True
             return None
         finally:
             if dialog.store.get(key) is session and session.planning_operation is operation:
@@ -145,3 +149,39 @@ class PlanningService:
                                                 session.planning_budget or PlanningBudget(),
                                                 detailed=True)
         return result if dialog.store.get(key) is session and calculation_fingerprint(session) == fingerprint else None
+
+    async def validate_fixed_order(self, parameters, start, finish, places, durations,
+                                   all_places=None):
+        """Refresh one persisted order without running the optimizer."""
+        zone = timezone(timedelta(minutes=start.utc_offset_minutes))
+        departure = parameters.bounds(zone)[0]
+        origins = (start, *places)
+        destinations = (*places,) + ((finish,) if finish else ())
+        budget = PlanningBudget()
+        matrix = await self.routes.matrices(origins, destinations, departure, budget)
+        all_places = tuple(all_places or places)
+        current = evaluate_order(places, parameters, start, finish, all_places, durations, matrix)
+        if current is None:
+            raise RoutesError('Сохранённый порядок больше не помещается в выбранный день.')
+        points = {start.id: start, **{p.id: p for p in places}}
+        if finish: points[finish.id] = finish
+        working = {(x.origin_id, x.destination_id, x.mode): x for x in matrix.options()}
+        for index in range(len(current.legs)):
+            leg = current.legs[index]
+            origin = points[leg.option.origin_id]; destination = points[leg.option.destination_id]
+            try:
+                exact = await self.routes.validate_leg(origin, destination, leg.departure,
+                                                       leg.option.mode, budget)
+            except RouteUnavailable:
+                if leg.option.mode != 'TRANSIT': raise
+                working.pop((origin.id, destination.id, 'TRANSIT'), None)
+                exact = await self.routes.validate_leg(origin, destination, leg.departure,
+                                                       'WALK', budget)
+            working[(origin.id, destination.id, exact.mode)] = exact
+            current = evaluate_order(places, parameters, start, finish, all_places, durations,
+                                     TravelMatrix(working.values()))
+            if current is None:
+                raise RoutesError('Сохранённый порядок больше не соответствует ограничениям дня.')
+        return DayPlan(current.stops, current.legs, current.exclusions, departure,
+                       current.finish, current.walking_min, current.travel_min,
+                       current.warnings)

@@ -84,6 +84,7 @@ class RouteDialogTests(unittest.TestCase):
             (PlanLeg(option, start, start + timedelta(minutes=15)),),
             (Exclusion('2', 'Park', 'не помещается в доступное время', 30),),
             start, start + timedelta(minutes=75), 0, 15, ('Check schedule',))
+        self.session.start_endpoint = Endpoint('start:hotel', 'Hotel', Coordinate(0, 0))
         self.session.stage = 'planned'
         text, rows = self.dialog.view(self.key)
         self.assertIn('09:15–10:15', text)
@@ -91,9 +92,49 @@ class RouteDialogTests(unittest.TestCase):
         self.assertIn('Исключено: Park', text)
         self.assertIn('Часы работы неизвестны', text)
         self.assertTrue(any('detail:0' in data for row in rows for _, data in row))
+        map_urls = [data for row in rows for label, data in row
+                    if label == 'Открыть маршрут в Google Maps']
+        self.assertEqual(len(map_urls), 1)
+        self.assertTrue(map_urls[0].startswith('https://www.google.com/maps/dir/?api=1'))
+        self.assertIn('Google Maps построит собственный вариант', text)
         self.click('edit_plan_parameters')
         self.assertEqual(self.session.stage, 'day_date')
         self.assertEqual(self.session.selected, {'1': 60, '2': 30})
+
+    def test_map_link_error_keeps_plan_and_warns_for_many_waypoints(self):
+        start = datetime(2026, 9, 10, 9, tzinfo=timezone.utc)
+        self.session.start_endpoint = Endpoint('start:h', 'Hotel', Coordinate(0, 0))
+        original = DayPlan((PlanStop('missing', 'Missing', start, start, 1),), (), (),
+                           start, start, 0, 0)
+        self.session.plan, self.session.stage = original, 'planned'
+        text, rows = self.dialog.view(self.key)
+        self.assertIn('Ссылка на карту недоступна', text)
+        self.assertFalse(any(label == 'Открыть маршрут в Google Maps'
+                             for row in rows for label, _ in row))
+        self.assertIs(self.session.plan, original)
+
+        self.session.places = tuple(
+            Place(str(i), str(i), '', '', 'museum', f'Address {i}',
+                  coordinate=Coordinate(i, i)) for i in range(5))
+        self.session.plan = DayPlan(
+            tuple(PlanStop(str(i), str(i), start, start, 1) for i in range(5)),
+            (), (), start, start, 0, 0)
+        self.session.finish_endpoint = Endpoint('finish:f', 'Finish', Coordinate(6, 6))
+        text, _ = self.dialog.view(self.key)
+        self.assertIn('часть промежуточных точек', text)
+
+    def test_failed_planning_view_links_places_in_user_order(self):
+        self.session.start_endpoint = Endpoint('start:h', 'Hotel', Coordinate(0, 0))
+        self.session.finish_endpoint = Endpoint('finish:f', 'Finish', Coordinate(3, 3))
+        self.session.selected = {'2': 30, '1': 60}
+        self.session.route_link_fallback = True
+        self.session.stage = 'confirmed'
+        text, rows = self.dialog.view(self.key)
+        links = [data for row in rows for label, data in row
+                 if label == 'Открыть выбранные места в Google Maps']
+        self.assertEqual(len(links), 1)
+        self.assertIn('порядке выбора', text)
+        self.assertIn('маршрут и расписание не рассчитаны', text)
 
 
 if __name__ == '__main__':

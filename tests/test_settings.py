@@ -16,6 +16,9 @@ class SettingsTests(unittest.TestCase):
         separate = Settings.load({**real, 'GOOGLE_ROUTES_API_KEY': 'ROUTES'})
         self.assertEqual(separate.routes_key, 'ROUTES')
         self.assertNotIn('ROUTES', repr(separate))
+        self.assertEqual(settings.routes_db_path, 'data/routes.sqlite3')
+        custom = Settings.load({**real, 'ROUTES_DB_PATH': '/tmp/routes.sqlite3'})
+        self.assertEqual(custom.routes_db_path, '/tmp/routes.sqlite3')
     def test_demo_explicit_and_no_google_key_needed(self):
         settings = Settings.load({'TELEGRAM_BOT_TOKEN': 'FAKE', 'BOT_MODE': 'demo'})
         self.assertEqual(settings.mode, 'demo')

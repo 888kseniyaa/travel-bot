@@ -13,7 +13,8 @@ GEO_FIELDS = 'places.id,places.displayName,places.formattedAddress,places.types,
 PLACE_FIELDS = 'places.id,places.displayName,places.formattedAddress,places.googleMapsUri,places.attributions,places.location'
 ENDPOINT_FIELDS = ('places.id,places.displayName,places.formattedAddress,places.googleMapsUri,'
                    'places.attributions,places.location,places.utcOffsetMinutes')
-DETAIL_FIELDS = 'id,location,utcOffsetMinutes,currentOpeningHours.periods,googleMapsUri,attributions'
+DETAIL_FIELDS = ('id,displayName,formattedAddress,location,utcOffsetMinutes,'
+                 'currentOpeningHours.periods,googleMapsUri,attributions')
 QUERIES = {'museum': ('museums', 'museum'), 'park': ('parks', 'park'),
            'architecture': ('architectural landmarks', None)}
 GEO_TYPES = {'locality', 'sublocality', 'neighborhood', 'administrative_area_level_3',
@@ -240,3 +241,25 @@ class GoogleSource:
                                   maps_url=safe_url(raw.get('googleMapsUri')) or place.maps_url,
                                   attributions=tuple(dict.fromkeys((*place.attributions, *credits(raw))))))
         return tuple(result)
+
+    async def refresh_saved_places(self, saved_places, day, budget):
+        result = []
+        for saved in saved_places:
+            raw = await self._details(saved.place_id, budget)
+            point = coordinate(raw.get('location') or {})
+            if point is None:
+                raise SourceError('У одного из сохранённых мест больше нет координат.')
+            windows, known = opening_windows(raw, 0)
+            result.append(Place(saved.place_id,
+                (raw.get('displayName') or {}).get('text') or 'Название не указано', '', '',
+                saved.category, raw.get('formattedAddress') or 'Адрес не указан',
+                safe_url(raw.get('googleMapsUri')), credits(raw), saved.categories,
+                point, windows, known))
+        return tuple(result)
+
+    async def refresh_saved_endpoint(self, saved, role, budget):
+        raw = await self._details(saved.place_id, budget) if saved.place_id else {}
+        point = coordinate(raw.get('location') or {}) or saved.coordinate
+        return Endpoint(role + ':' + saved.place_id, saved.query, point,
+                        int(raw.get('utcOffsetMinutes', saved.utc_offset_minutes) or 0),
+                        safe_url(raw.get('googleMapsUri')), credits(raw))

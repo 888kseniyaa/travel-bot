@@ -7,32 +7,41 @@ from telegram.ext import Application, CallbackQueryHandler, CommandHandler, Mess
 from .dialog import Dialog, InputError
 from .search import complete_search
 from .planning import calculation_fingerprint
+from .saved_route_flow import SavedRouteFlow
+from .route_repository import RepositoryError
 
 log = logging.getLogger('travel_bot')
 
 class Adapter:
-    def __init__(self, dialog=None, settings=None, planning_service=None):
+    def __init__(self, dialog=None, settings=None, planning_service=None, saved_service=None):
         self.dialog = dialog if dialog is not None else Dialog()
         self.settings = settings
         self.tasks = {}
         self.operations = {}
         self.planning_service = planning_service
         self.planning_tasks = {}
+        self.saved_service = saved_service
+        self.saved_flow = SavedRouteFlow(saved_service) if saved_service else None
+        if self.saved_flow: self.dialog.saved_flow = self.saved_flow
+        self.saved_tasks = {}
         self.cleaner = None
 
     async def close(self):
-        pending = list(self.tasks.values()) + list(self.planning_tasks.values())
+        pending = list(self.tasks.values()) + list(self.planning_tasks.values()) + list(self.saved_tasks.values())
         if self.cleaner: pending.append(self.cleaner)
         for task in pending: task.cancel()
         if pending: await asyncio.gather(*pending, return_exceptions=True)
         self.tasks.clear()
         self.operations.clear()
         self.planning_tasks.clear()
+        self.saved_tasks.clear()
         if self.dialog.real and hasattr(self.dialog.source, 'close'):
             await self.dialog.source.close()
         routes = getattr(self.planning_service, 'routes', None)
         if routes is not None and hasattr(routes, 'close'):
             await routes.close()
+        repository = getattr(self.saved_service, 'repository', None)
+        if repository is not None: repository.close()
 
     async def cleanup(self):
         while True:
@@ -50,6 +59,10 @@ class Adapter:
         task = self.planning_tasks.pop(key, None)
         if task: task.cancel()
 
+    def cancel_saved(self, key):
+        task = self.saved_tasks.pop(key, None)
+        if task: task.cancel()
+
     def launch_planning(self, key, update):
         session = self.dialog.store.get(key)
         if session is None or self.planning_service is None:
@@ -64,6 +77,13 @@ class Adapter:
             try:
                 if detail_index is None:
                     await self.planning_service.calculate(self.dialog, key, session, fingerprint)
+                    if (self.saved_service and self.dialog.store.get(key) is session and
+                            session.stage == 'planned' and session.plan):
+                        try:
+                            saved = self.saved_service.autosave(session, key[1])
+                            session.notice = f'Маршрут сохранён: {saved.summary.name}.'
+                        except (RepositoryError, ValueError) as error:
+                            session.notice = str(error)
                 else:
                     result = await self.planning_service.detail(
                         self.dialog, key, session, detail_index, fingerprint)
@@ -82,6 +102,31 @@ class Adapter:
                 if self.planning_tasks.get(key) is asyncio.current_task():
                     self.planning_tasks.pop(key, None)
         self.planning_tasks[key] = asyncio.create_task(run())
+
+    def launch_saved_open(self, key, update):
+        session = self.dialog.store.get(key)
+        request = session.saved_open_request if session else None
+        if not self.saved_service or not request or session.stage != 'saved_loading': return
+        self.cancel_saved(key)
+        async def run():
+            try:
+                try:
+                    opened = await self.saved_service.open_current(key[1], request[0], request[1])
+                except Exception as error:
+                    if self.dialog.store.get(key) is session and session.saved_open_request == request:
+                        session.notice = (str(error) if isinstance(error, (RepositoryError, ValueError))
+                                          else 'Не удалось обновить сохранённый маршрут.')
+                        session.stage = 'saved_card'
+                else:
+                    if self.dialog.store.get(key) is session and session.saved_open_request == request:
+                        session.saved_opened = opened; session.saved_current = opened.saved
+                        session.stage = 'saved_opened'; session.notice = ''
+                if self.dialog.store.get(key) is session:
+                    session.saved_open_request = None; session.revision += 1
+                    await self.send(update, *self.dialog.view(key))
+            finally:
+                if self.saved_tasks.get(key) is asyncio.current_task(): self.saved_tasks.pop(key, None)
+        self.saved_tasks[key] = asyncio.create_task(run())
 
     def launch_search(self, key, update):
         session = self.dialog.store.get(key)
@@ -124,7 +169,8 @@ class Adapter:
         if self.dialog.real: text = 'Google Maps\n' + text
 
         markup = InlineKeyboardMarkup([
-            [InlineKeyboardButton(label, callback_data=data) for label, data in row]
+            [InlineKeyboardButton(label, url=data) if data.startswith('https://www.google.com/maps/')
+             else InlineKeyboardButton(label, callback_data=data) for label, data in row]
             for row in rows
         ]) if rows else None
         if edit and update.callback_query:
@@ -153,7 +199,22 @@ class Adapter:
         if key is not None:
             self.cancel_search(key)
             self.cancel_planning(key)
+            self.cancel_saved(key)
             await self.send(update, *self.dialog.start(key))
+
+    async def routes(self, update, context):
+        key = await self.key(update)
+        if key is None or not self.saved_flow: return
+        try: view = self.saved_flow.enter(self.dialog, key, key[1])
+        except InputError as error: view = (str(error), None)
+        await self.send(update, *view)
+
+    async def delete_my_data(self, update, context):
+        key = await self.key(update)
+        if key is None or not self.saved_flow: return
+        try: view = self.saved_flow.enter_delete_all(self.dialog, key, key[1])
+        except InputError as error: view = (str(error), None)
+        await self.send(update, *view)
 
     async def resume(self, update, context):
         key = await self.key(update)
@@ -168,13 +229,18 @@ class Adapter:
         key = await self.key(update)
         if key is None: return
         try:
-            view = self.dialog.text(key, update.effective_message.text or '')
+            session = self.dialog.store.get(key)
+            if self.saved_flow and session and session.stage == 'saved_rename':
+                view = self.saved_flow.text(self.dialog, key, key[1], update.effective_message.text or '')
+            else:
+                view = self.dialog.text(key, update.effective_message.text or '')
         except InputError as error:
             await self.send(update, str(error))
             return
         await self.send(update, *view)
         self.launch_search(key, update)
         self.launch_planning(key, update)
+        self.launch_saved_open(key, update)
 
     async def callback(self, update, context):
         query = update.callback_query
@@ -197,6 +263,7 @@ class Adapter:
         await self.send(update, *view, edit=True)
         self.launch_search(key, update)
         self.launch_planning(key, update)
+        self.launch_saved_open(key, update)
 
     async def error(self, update, context):
         # No raw exception/traceback: it can contain the token in a request URL.
@@ -205,14 +272,16 @@ class Adapter:
             await self.send(update, 'Не удалось выполнить действие. Проверьте текущий подбор: /resume. Новый подбор: /start.')
 
 
-def build_application(token, dialog=None, settings=None, planning_service=None):
-    adapter = Adapter(dialog, settings, planning_service)
+def build_application(token, dialog=None, settings=None, planning_service=None, saved_service=None):
+    adapter = Adapter(dialog, settings, planning_service, saved_service)
     async def initialize(app): adapter.cleaner = asyncio.create_task(adapter.cleanup())
     async def shutdown(app): await adapter.close()
     app = (Application.builder().token(token).concurrent_updates(False)
            .post_init(initialize).post_stop(shutdown).build())
     app.add_handler(CommandHandler('start', adapter.start))
     app.add_handler(CommandHandler('resume', adapter.resume))
+    app.add_handler(CommandHandler('routes', adapter.routes))
+    app.add_handler(CommandHandler('delete_my_data', adapter.delete_my_data))
     app.add_handler(CommandHandler(['privacy', 'terms'], adapter.policy))
     app.add_handler(CallbackQueryHandler(adapter.callback))
     app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, adapter.text))
