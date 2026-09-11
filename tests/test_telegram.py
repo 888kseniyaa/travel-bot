@@ -29,9 +29,9 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         await a.text(self.update('75'), None)
         result = await click('confirm')
         text = result.callback_query.edit_message_text.call_args.kwargs['text']
-        self.assertIn('135 мин', text)
-        self.assertIn('Маршрут пока не рассчитан', text)
-        await click('edit')
+        self.assertIn('Введите дату', text)
+        await click('back_to_places')
+        self.assertEqual(a.dialog.store.get((10, 1)).selected['hermitage'], 75)
         await click('new')
         self.assertEqual(a.dialog.store.get((10, 1)).selected, {})
 

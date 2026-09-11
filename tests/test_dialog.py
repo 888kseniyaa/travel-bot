@@ -34,11 +34,10 @@ class DialogTests(unittest.TestCase):
             with self.assertRaises(InputError): self.d.text(self.key, value)
             self.assertEqual(self.d.store.get(self.key).selected['hermitage'], 120)
         self.d.text(self.key, ' 75 ')
-        self.click('confirm')
         text, _ = self.d.view(self.key)
         self.assertIn('135 мин', text)
-        self.assertIn('Дорога не включена', text)
-        self.click('edit')
+        self.click('confirm')
+        self.click('back_to_places')
         self.assertEqual(self.d.store.get(self.key).selected['hermitage'], 75)
 
     def test_isolation_and_old_buttons(self):
