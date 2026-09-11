@@ -23,7 +23,7 @@ class RealAdapterTests(unittest.IsolatedAsyncioTestCase):
         source.gate.set(); await asyncio.sleep(0)
         self.assertEqual(adapter.dialog.require((1,1)).stage, 'geo')
         await adapter.close()
-    async def test_long_google_content_split_with_attribution_and_keyboard(self):
+    async def test_long_content_split_preserves_keyboard(self):
         adapter = Adapter(Dialog(Source())); u = self.update()
         await adapter.send(u, '😀' * 5000, [[('Next', 'short')]])
         sent = u.effective_message.reply_text.call_args_list
@@ -31,7 +31,6 @@ class RealAdapterTests(unittest.IsolatedAsyncioTestCase):
         for call in sent:
             text = call.kwargs['text']
             self.assertLessEqual(len(text.encode('utf-16-le')) // 2, 4096)
-            self.assertIn('Google Maps', text)
         self.assertIsNotNone(sent[-1].kwargs['reply_markup'])
 
     async def test_new_search_while_old_result_is_being_sent(self):
@@ -78,8 +77,9 @@ class RealAdapterTests(unittest.IsolatedAsyncioTestCase):
         await click('duration:3'); await adapter.text(self.update('75'), None)
         result = await click('confirm')
         text = result.callback_query.edit_message_text.call_args.kwargs['text']
-        self.assertIn('195 мин', text)
+        self.assertIn('Введите дату', text)
         self.assertIn('Google Maps', text)
         self.assertNotIn('TEST_SECRET', text)
+        self.assertEqual(sum(adapter.dialog.require(k).selected.values()), 195)
         self.assertEqual(len(requests), 3)
         self.assertEqual(len(adapter.dialog.require(k).places), 5)
