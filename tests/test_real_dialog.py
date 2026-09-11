@@ -32,10 +32,11 @@ class RealDialogTests(unittest.IsolatedAsyncioTestCase):
     async def test_full_flow_pages_duration_confirmation_and_failure(self):
         await self.prepare()
         self.click('toggle:0'); self.click('page:1'); self.click('toggle:3')
-        self.click('duration:3'); self.d.text(self.k, '75'); self.click('confirm')
+        self.click('duration:3'); self.d.text(self.k, '75')
         self.assertIn('195 мин', self.d.view(self.k)[0])
-        self.assertIn('Дорога не включена', self.d.view(self.k)[0])
-        self.click('edit'); self.source.fail = True; self.click('refresh'); await self.finish()
+        self.click('confirm')
+        self.assertIn('Введите дату', self.d.view(self.k)[0])
+        self.click('back_to_places'); self.source.fail = True; self.click('refresh'); await self.finish()
         self.assertEqual(len(self.d.require(self.k).selected), 2)
         self.assertIn('Квота', self.d.view(self.k)[0])
         for row in self.d.view(self.k)[1]:
@@ -71,3 +72,17 @@ class RealDialogTests(unittest.IsolatedAsyncioTestCase):
         with patch('travel_bot.state.monotonic', return_value=s.expires + 1):
             with self.assertRaises(InputError): self.d.click(self.k, button)
             self.assertIsNone(self.d.store.get(self.k))
+
+    async def test_main_views_use_one_compact_source_note(self):
+        initial = self.d.view(self.k)[0]
+        note = 'Места: Google Maps • время посещения: оценка бота'
+        self.assertEqual(initial.count(note), 1)
+        self.assertLess(initial.index('Введите город'), initial.index(note))
+        await self.prepare()
+        places = self.d.view(self.k)[0]
+        self.assertEqual(places.count(note), 1)
+        self.assertTrue(places.startswith('Выберите места'))
+        self.assertNotIn('прямоугольник Google', places)
+        self.assertNotIn('Выдача ограничена', places)
+        labels = [label for row in self.d.view(self.k)[1] for label, _ in row]
+        self.assertIn('Подтвердить места', labels)

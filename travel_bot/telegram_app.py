@@ -154,6 +154,18 @@ class Adapter:
         else:
             await self.send(update, 'Demo: тестовые данные. Состояние хранится в памяти до 30 минут и сбрасывается при перезапуске.')
 
+    async def about(self, update, context):
+        key = await self.key(update)
+        if key is None: return
+        await self.send(update, '\n'.join((
+            'О боте',
+            'Места и адреса берутся из Google Maps. Время посещения — приблизительная оценка бота, которую можно изменить.',
+            'Поиск выполняется в прямоугольной области Google и показывает до 15 мест, поэтому это не полный каталог района.',
+            'Google Maps перестраивает маршрут по переданным точкам; путь и время могут отличаться от плана бота.',
+            'Сохранённые маршруты хранятся до 30 дней. Управление: /routes и /delete_my_data.',
+            'Документы: /terms и /privacy.',
+        )))
+
     async def send(self, update, text, rows=None, edit=False):
         # 1500 Unicode codepoints <= 3000 UTF-16 units; leave room for attribution.
         if len(text) > 1500:
@@ -166,8 +178,6 @@ class Adapter:
             for index, part in enumerate(parts):
                 await self.send(update, part, rows if index == len(parts) - 1 else None, edit and index == 0)
             return
-        if self.dialog.real: text = 'Google Maps\n' + text
-
         markup = InlineKeyboardMarkup([
             [InlineKeyboardButton(label, url=data) if data.startswith('https://www.google.com/maps/')
              else InlineKeyboardButton(label, callback_data=data) for label, data in row]
@@ -282,6 +292,7 @@ def build_application(token, dialog=None, settings=None, planning_service=None, 
     app.add_handler(CommandHandler('resume', adapter.resume))
     app.add_handler(CommandHandler('routes', adapter.routes))
     app.add_handler(CommandHandler('delete_my_data', adapter.delete_my_data))
+    app.add_handler(CommandHandler('about', adapter.about))
     app.add_handler(CommandHandler(['privacy', 'terms'], adapter.policy))
     app.add_handler(CallbackQueryHandler(adapter.callback))
     app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, adapter.text))

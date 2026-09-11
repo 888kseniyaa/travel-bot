@@ -11,6 +11,8 @@ from .route_map import (
 class InputError(ValueError):
     pass
 
+SOURCE_NOTE = 'Места: Google Maps • время посещения: оценка бота'
+
 class Dialog:
     def __init__(self, source: PlaceSource = None, store=None, today_provider=None):
         self.source = source if source is not None else DemoSource()
@@ -41,15 +43,23 @@ class Dialog:
             try:
                 raw = text.strip()
                 value = date.fromisoformat(raw) if '-' in raw else date(*reversed([int(x) for x in raw.split('.')]))
-                DayParameters(value, time(9), time(20)).validate(self.today_provider())
+                defaults = DayParameters(value, time(10), time(20), 90, None)
+                defaults.validate(self.today_provider())
             except (ValueError, ValidationError):
                 raise InputError('Введите дату от сегодня до следующих 7 дней в формате ГГГГ-ММ-ДД.')
-            s.draft_date, s.stage = value, 'day_start'
+            s.day_parameters = defaults
+            s.draft_date, s.draft_start, s.draft_end = value, time(10), time(20)
+            s.draft_walking_limit = 90
+            s.start_endpoint, s.finish_endpoint = None, None
+            s.editing_day_settings = False
+            s.stage = 'start_query'
         elif s.stage in ('day_start', 'day_end', 'lunch_time'):
             try: value = time.fromisoformat(text.strip())
             except ValueError: raise InputError('Введите время в формате ЧЧ:ММ, например 09:30.')
             if s.stage == 'day_start': s.draft_start, s.stage = value, 'day_end'
-            elif s.stage == 'day_end': s.draft_end, s.stage = value, 'start_query'
+            elif s.stage == 'day_end':
+                s.draft_end = value
+                s.stage = 'finish_choice' if s.editing_day_settings else 'start_query'
             else: s.draft_lunch_start, s.stage = value, 'lunch_duration'
         elif s.stage in ('start_query', 'finish_query'):
             query = ' '.join(text.split())
@@ -101,6 +111,7 @@ class Dialog:
         except (TypeError, ValidationError):
             raise InputError('Параметры дня несовместимы. Проверьте начало, конец и обед.')
         s.day_parameters, s.plan, s.stage = params, None, 'plan_ready'
+        s.editing_day_settings = False
 
     def click(self, key, data):
         s = self.require(key)
@@ -118,17 +129,36 @@ class Dialog:
             if len(s.selected) > 6:
                 raise InputError('Для одного расчёта выберите не более шести мест.')
             s.stage, s.plan, s.notice = 'day_date', None, ''
+        elif action == 'retry_calculate' and s.stage == 'confirmed' and s.route_link_fallback:
+            s.stage, s.notice, s.detail_text = 'planning_requested', '', ''
+        elif action == 'edit_day_settings' and s.stage == 'plan_ready':
+            p = s.day_parameters
+            s.draft_date, s.draft_start, s.draft_end = p.date, p.start, p.end
+            s.draft_walking_limit = p.walking_limit_min
+            s.draft_lunch_start = p.lunch.start if p.lunch else None
+            s.editing_day_settings = True
+            s.stage, s.plan = 'day_start', None
+        elif action == 'keep_day_settings' and s.editing_day_settings and s.stage in (
+                'day_start', 'day_end', 'finish_choice', 'finish_query',
+                'walking_choice', 'walking_input', 'lunch_choice',
+                'lunch_time', 'lunch_duration'):
+            s.editing_day_settings = False
+            s.stage = 'plan_ready'
+        elif action == 'back_to_places' and s.stage in ('day_date', 'start_query', 'plan_ready'):
+            s.editing_day_settings = False
+            s.stage, s.plan = 'places', None
         elif action == 'edit_plan_parameters' and s.stage == 'planned':
             s.stage, s.plan = 'day_date', None
         elif action == 'edit_plan_places' and s.stage in ('planned', 'confirmed', 'plan_ready'):
             s.stage, s.plan = 'places', None
         elif action == 'end:default' and s.stage == 'day_end':
-            s.draft_end, s.stage = time(20), 'start_query'
+            s.draft_end = time(20)
+            s.stage = 'finish_choice' if s.editing_day_settings else 'start_query'
         elif op == 'endpoint' and s.stage in ('endpoint_confirm_start', 'endpoint_confirm_finish') and value.isdigit() and int(value) < len(s.endpoint_candidates):
             endpoint = s.endpoint_candidates[int(value)]
             if s.stage == 'endpoint_confirm_start':
                 s.start_endpoint = replace(endpoint, id='start:' + endpoint.id)
-                s.stage = 'finish_choice'
+                s.stage = 'plan_ready'
             else:
                 s.finish_endpoint = replace(endpoint, id='finish:' + endpoint.id)
                 s.stage = 'walking_choice'
@@ -187,7 +217,7 @@ class Dialog:
                 s.pending, s.stage = value, 'duration'
         elif action == 'confirm' and s.stage == 'places':
             if not s.selected: raise InputError('Выберите хотя бы одно место перед подтверждением.')
-            s.stage = 'confirmed'
+            s.stage, s.plan, s.notice = 'day_date', None, ''
         elif action == 'edit' and s.stage in ('confirmed', 'duration'):
             s.pending, s.stage = None, 'places'
         elif action == 'interests' and s.stage == 'places':
@@ -210,17 +240,11 @@ class Dialog:
         def attribution(place):
             if place.maps_url: lines.append('Google Maps: ' + place.maps_url)
             lines.extend(place.attributions)
-        lines = [self.source.label]
-        if self.real:
-            lines.append('Данные мест: Google Maps. Оценки времени: бот.')
-            if s.geography:
-                lines += ['Поиск: ' + getattr(s.geography, 'label', s.city or 'выбранная территория'),
-                          'Территория — прямоугольник Google, не точная административная граница.']
-                lines.extend(getattr(s.geography, 'attributions', ()))
-            lines.append('Выдача ограничена: до 15 мест; не полный каталог. /terms /privacy')
+        lines = []
         if s.notice: lines.append(s.notice)
         if s.stage == 'day_date':
             lines += ['Введите дату маршрута в формате ГГГГ-ММ-ДД.', 'Доступны сегодня и следующие 7 дней.']
+            button('Назад к местам', 'back_to_places')
         elif s.stage == 'day_start':
             lines += ['Введите время старта в формате ЧЧ:ММ.']
         elif s.stage == 'day_end':
@@ -228,6 +252,7 @@ class Dialog:
             button('Закончить в 20:00', 'end:default')
         elif s.stage == 'start_query':
             lines += ['Введите адрес или название стартовой точки. Результат потребуется подтвердить.']
+            button('Назад к местам', 'back_to_places')
         elif s.stage == 'finish_choice':
             lines += ['Где закончить маршрут?']
             button('У последнего места', 'finish:last')
@@ -255,13 +280,15 @@ class Dialog:
             lines += ['Введите длительность обеда в минутах.']
         elif s.stage == 'plan_ready':
             p = s.day_parameters
-            lines += [f'День: {p.date:%d.%m.%Y}, {p.start:%H:%M}–{p.end:%H:%M}.',
+            lines += ['Проверьте настройки и постройте маршрут.',
+                      f'День: {p.date:%d.%m.%Y}, {p.start:%H:%M}–{p.end:%H:%M}.',
                       f'Старт: {s.start_endpoint.label}.',
                       'Финиш: ' + (s.finish_endpoint.label if s.finish_endpoint else 'у последнего места') + '.',
                       f'Лимит ходьбы: {p.walking_limit_min} мин.',
                       'Обед: ' + (f'{p.lunch.start:%H:%M}, {p.lunch.duration_min} мин.' if p.lunch else 'нет.')]
-            button('Рассчитать маршрут', 'calculate')
-            button('Изменить места и длительности', 'edit_plan_places')
+            button('Построить маршрут', 'calculate')
+            button('Изменить настройки дня', 'edit_day_settings')
+            button('Назад к местам', 'back_to_places')
         elif s.stage in ('planning_requested', 'planning', 'detail_requested'):
             lines += ['Рассчитываю маршрут. Повторное нажатие не требуется; выбор и параметры сохранены.']
         elif s.stage == 'planned' and s.plan:
@@ -300,9 +327,7 @@ class Dialog:
                     lines.append('⚠️ На некоторых мобильных устройствах часть промежуточных точек может не открыться.')
                 link_button('Открыть маршрут в Google Maps', route_map.url)
             if s.detail_text: lines += ['', 'Подробности перехода:', s.detail_text]
-            button('Пересчитать', 'calculate')
-            button('Изменить параметры дня', 'edit_plan_parameters')
-            button('Изменить места и длительности', 'edit_plan_places')
+            button('Изменить', 'edit_plan_places')
         elif s.stage == 'searching':
             lines += ['Поиск выполняется. Повторный запрос не нужен. Выбор сохранён.']
         elif s.stage == 'geo_confirm':
@@ -315,7 +340,8 @@ class Dialog:
         elif s.stage == 'geo':
             lines += ['Введите город или район.', self.source.geography_hint]
         elif s.stage == 'interests':
-            lines += [f'География: {s.district or s.city}.', 'Выберите интересы (можно несколько):']
+            lines += ['Выберите один или несколько интересов.',
+                      f'География: {s.district or s.city}.']
             for id, label in CATEGORIES.items():
                 button(('✅ ' if id in s.categories else '⬜ ') + label, 'category:' + id)
             button('Показать места', 'show')
@@ -327,15 +353,12 @@ class Dialog:
             attribution(p)
             button('Отмена изменения', 'edit')
         else:
-            lines += ['Время — приблизительная оценка приложения по категории, не статистика Google.']
             if s.stage == 'confirmed':
-                lines += ['Список подтверждён:']
+                lines += ['Расчёт не завершён. Выбранные места сохранены:']
                 for p in s.places:
                     if p.id in s.selected:
                         lines.append(f'• {p.name} — {s.selected[p.id]} мин')
-                        attribution(p)
-                lines += [f'Итого посещения: {sum(s.selected.values())} мин.',
-                          'Дорога не включена в сумму. Маршрут пока не рассчитан.']
+                lines += [f'Посещения: {sum(s.selected.values())} мин.']
                 if s.route_link_fallback and s.start_endpoint:
                     try:
                         route_map = build_selected_route_map_link(
@@ -347,9 +370,11 @@ class Dialog:
                         if route_map.mobile_waypoint_warning:
                             lines.append('⚠️ На некоторых мобильных устройствах часть промежуточных точек может не открыться.')
                         link_button('Открыть выбранные места в Google Maps', route_map.url)
-                button('Вернуться к редактированию', 'edit')
-                button('Спланировать день', 'plan')
+                if s.route_link_fallback:
+                    button('Повторить расчёт', 'retry_calculate')
+                button('Изменить', 'edit_plan_places')
             else:
+                lines += ['Выберите места. Повторное нажатие снимает выбор; время можно изменить кнопкой ⏱.']
                 if not s.places: lines += ['Мест не найдено. Измените интересы или географию.']
                 page_places = s.places[s.page * 3:(s.page + 1) * 3] if self.real else s.places
                 for p in page_places:
@@ -369,12 +394,18 @@ class Dialog:
                     if s.page: button('← Предыдущая', f'page:{s.page - 1}')
                     if (s.page + 1) * 3 < len(s.places): button('Следующая →', f'page:{s.page + 1}')
                 lines += [f'\nВыбрано: {len(s.selected)}. Посещения: {sum(s.selected.values())} мин.']
-                button('Подтвердить список', 'confirm')
+                button('Подтвердить места', 'confirm')
                 button('Изменить интересы' if self.real else 'Изменить интересы (сброс мест)', 'interests')
                 if self.real:
                     button('Повторить поиск (выбор сохранится)', 'refresh')
                     button('Другая география (сброс выбора)', 'geography')
+        if s.editing_day_settings and s.stage in (
+                'day_start', 'day_end', 'finish_choice', 'finish_query',
+                'walking_choice', 'walking_input', 'lunch_choice',
+                'lunch_time', 'lunch_duration'):
+            button('Оставить текущие настройки', 'keep_day_settings')
         if self.saved_flow and s.stage in ('geo', 'planned'):
             button('Мои маршруты', 'routes')
         button('Новый подбор', 'new')
+        lines.append(SOURCE_NOTE if self.real else self.source.label)
         return '\n'.join(lines), rows

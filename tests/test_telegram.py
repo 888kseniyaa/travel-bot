@@ -29,9 +29,9 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         await a.text(self.update('75'), None)
         result = await click('confirm')
         text = result.callback_query.edit_message_text.call_args.kwargs['text']
-        self.assertIn('135 мин', text)
-        self.assertIn('Маршрут пока не рассчитан', text)
-        await click('edit')
+        self.assertIn('Введите дату', text)
+        await click('back_to_places')
+        self.assertEqual(a.dialog.store.get((10, 1)).selected['hermitage'], 75)
         await click('new')
         self.assertEqual(a.dialog.store.get((10, 1)).selected, {})
 
@@ -97,6 +97,15 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         await adapter.routes(update, None)
         self.assertIn('Мои маршруты', update.effective_message.reply_text.call_args.kwargs['text'])
         self.assertEqual(adapter.dialog.store.get((10, 1)).selected, {'draft': 45})
+
+    async def test_about_explains_data_and_controls(self):
+        adapter = Adapter()
+        update = self.update('/about')
+        await adapter.about(update, None)
+        text = update.effective_message.reply_text.call_args.kwargs['text']
+        for expected in ('Google Maps', 'оценка бота', 'прямоугольн', '15 мест',
+                         'перестраивает маршрут', '30 дней', '/terms', '/privacy'):
+            self.assertIn(expected, text)
 
     def test_application_builds_without_network(self):
         app = build_application('123456:TEST_ONLY_NOT_A_REAL_TOKEN')

@@ -38,6 +38,7 @@ class Selection:
     draft_end: Optional[time] = None
     draft_walking_limit: int = 90
     draft_lunch_start: Optional[time] = None
+    editing_day_settings: bool = False
     detail_text: str = ''
     detail_request: Optional[int] = None
     geography_query: str = ''
