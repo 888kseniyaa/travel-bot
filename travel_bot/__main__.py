@@ -7,6 +7,8 @@ from .settings import Settings
 from .dialog import Dialog
 from .google_places import GoogleSource
 from .places import DemoSource
+from .routes import RoutesClient
+from .planning import PlanningService
 
 
 def main():
@@ -23,7 +25,9 @@ def main():
         return 1
     try:
         source = GoogleSource(settings.google_key) if settings.mode == 'real' else DemoSource()
-        app = build_application(settings.token, Dialog(source), settings)
+        planning = (PlanningService(source, RoutesClient(settings.routes_key))
+                    if settings.mode == 'real' else None)
+        app = build_application(settings.token, Dialog(source), settings, planning)
         app.run_polling(allowed_updates=['message', 'callback_query'], bootstrap_retries=3)
     except (TelegramError, ValueError):
         print('Не удалось запустить бот. Проверьте токен, сеть и отсутствие второго запущенного экземпляра.', file=sys.stderr)

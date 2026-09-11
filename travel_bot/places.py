@@ -1,6 +1,7 @@
 """Replace PlaceSource to connect a real provider; minutes remain app estimates."""
 from dataclasses import dataclass
 from typing import Protocol, Optional
+from .day import Coordinate
 
 CATEGORIES = {'museum': 'Музеи', 'park': 'Парки', 'architecture': 'Архитектура'}
 MINUTES = {'museum': 120, 'park': 60, 'architecture': 45}
@@ -16,6 +17,9 @@ class Place:
     maps_url: str = ""
     attributions: tuple[str, ...] = ()
     categories: tuple[str, ...] = ()
+    coordinate: Optional[Coordinate] = None
+    opening_windows: tuple[tuple[object, object], ...] = ()
+    hours_known: bool = False
 
 class PlaceSource(Protocol):
     geography_hint: str

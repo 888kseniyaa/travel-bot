@@ -1,8 +1,10 @@
 from dataclasses import dataclass, field
 from typing import Optional
+from datetime import date, time
 from uuid import uuid4
 from .places import Place
 from .google_places import Budget, Geography
+from .day import DayParameters, DayPlan, Endpoint
 from time import monotonic
 
 @dataclass
@@ -22,6 +24,21 @@ class Selection:
     budget: Budget = field(default_factory=Budget)
     page: int = 0
     notice: str = ''
+    day_parameters: Optional[DayParameters] = None
+    start_endpoint: Optional[Endpoint] = None
+    finish_endpoint: Optional[Endpoint] = None
+    endpoint_candidates: tuple[Endpoint, ...] = ()
+    plan: Optional[DayPlan] = None
+    planning_operation: Optional[object] = None
+    planning_fingerprint: str = ''
+    planning_budget: Optional[object] = None
+    draft_date: Optional[date] = None
+    draft_start: Optional[time] = None
+    draft_end: Optional[time] = None
+    draft_walking_limit: int = 90
+    draft_lunch_start: Optional[time] = None
+    detail_text: str = ''
+    detail_request: Optional[int] = None
     expires: float = field(default_factory=lambda: monotonic() + 1800)
 
 class Store:

@@ -6,26 +6,33 @@ from telegram.error import TelegramError
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, MessageHandler, filters
 from .dialog import Dialog, InputError
 from .search import complete_search
+from .planning import calculation_fingerprint
 
 log = logging.getLogger('travel_bot')
 
 class Adapter:
-    def __init__(self, dialog=None, settings=None):
+    def __init__(self, dialog=None, settings=None, planning_service=None):
         self.dialog = dialog if dialog is not None else Dialog()
         self.settings = settings
         self.tasks = {}
         self.operations = {}
+        self.planning_service = planning_service
+        self.planning_tasks = {}
         self.cleaner = None
 
     async def close(self):
-        pending = list(self.tasks.values())
+        pending = list(self.tasks.values()) + list(self.planning_tasks.values())
         if self.cleaner: pending.append(self.cleaner)
         for task in pending: task.cancel()
         if pending: await asyncio.gather(*pending, return_exceptions=True)
         self.tasks.clear()
         self.operations.clear()
+        self.planning_tasks.clear()
         if self.dialog.real and hasattr(self.dialog.source, 'close'):
             await self.dialog.source.close()
+        routes = getattr(self.planning_service, 'routes', None)
+        if routes is not None and hasattr(routes, 'close'):
+            await routes.close()
 
     async def cleanup(self):
         while True:
@@ -38,6 +45,43 @@ class Adapter:
         self.operations.pop(key, None)
         task = self.tasks.pop(key, None)
         if task: task.cancel()
+
+    def cancel_planning(self, key):
+        task = self.planning_tasks.pop(key, None)
+        if task: task.cancel()
+
+    def launch_planning(self, key, update):
+        session = self.dialog.store.get(key)
+        if session is None or self.planning_service is None:
+            return
+        detail_index = session.detail_request if session.stage == 'detail_requested' else None
+        if session.stage not in ('planning_requested', 'detail_requested'):
+            return
+        if key in self.planning_tasks and not self.planning_tasks[key].done():
+            return
+        fingerprint = calculation_fingerprint(session)
+        async def run():
+            try:
+                if detail_index is None:
+                    await self.planning_service.calculate(self.dialog, key, session, fingerprint)
+                else:
+                    result = await self.planning_service.detail(
+                        self.dialog, key, session, detail_index, fingerprint)
+                    if self.dialog.store.get(key) is session:
+                        if result is not None:
+                            session.detail_text = ('\n'.join(result.steps) if result.steps else
+                                                   'Подробных шагов нет; откройте ссылку Google Maps.')
+                        else:
+                            session.notice = 'Подробности перехода недоступны.'
+                        session.detail_request = None
+                        session.stage = 'planned'
+                        session.revision += 1
+                if self.dialog.store.get(key) is session:
+                    await self.send(update, *self.dialog.view(key))
+            finally:
+                if self.planning_tasks.get(key) is asyncio.current_task():
+                    self.planning_tasks.pop(key, None)
+        self.planning_tasks[key] = asyncio.create_task(run())
 
     def launch_search(self, key, update):
         session = self.dialog.store.get(key)
@@ -108,6 +152,7 @@ class Adapter:
         key = await self.key(update)
         if key is not None:
             self.cancel_search(key)
+            self.cancel_planning(key)
             await self.send(update, *self.dialog.start(key))
 
     async def resume(self, update, context):
@@ -129,6 +174,7 @@ class Adapter:
             return
         await self.send(update, *view)
         self.launch_search(key, update)
+        self.launch_planning(key, update)
 
     async def callback(self, update, context):
         query = update.callback_query
@@ -145,9 +191,12 @@ class Adapter:
         except InputError as error:
             await self.send(update, str(error))
             return
-        if self.dialog.store.get(key) is not previous: self.cancel_search(key)
+        if self.dialog.store.get(key) is not previous:
+            self.cancel_search(key)
+            self.cancel_planning(key)
         await self.send(update, *view, edit=True)
         self.launch_search(key, update)
+        self.launch_planning(key, update)
 
     async def error(self, update, context):
         # No raw exception/traceback: it can contain the token in a request URL.
@@ -156,8 +205,8 @@ class Adapter:
             await self.send(update, 'Не удалось выполнить действие. Проверьте текущий подбор: /resume. Новый подбор: /start.')
 
 
-def build_application(token, dialog=None, settings=None):
-    adapter = Adapter(dialog, settings)
+def build_application(token, dialog=None, settings=None, planning_service=None):
+    adapter = Adapter(dialog, settings, planning_service)
     async def initialize(app): adapter.cleaner = asyncio.create_task(adapter.cleanup())
     async def shutdown(app): await adapter.close()
     app = (Application.builder().token(token).concurrent_updates(False)

@@ -1,14 +1,19 @@
 """Places API (New), Text Search only. No disk cache, photos or reviews."""
 import asyncio
 import math
+from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass, replace
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 import httpx
+from .day import Coordinate, Endpoint
 from .places import Place
 
 ENDPOINT = 'https://places.googleapis.com/v1/places:searchText'
 GEO_FIELDS = 'places.id,places.displayName,places.formattedAddress,places.types,places.viewport,places.attributions'
-PLACE_FIELDS = 'places.id,places.displayName,places.formattedAddress,places.googleMapsUri,places.attributions'
+PLACE_FIELDS = 'places.id,places.displayName,places.formattedAddress,places.googleMapsUri,places.attributions,places.location'
+ENDPOINT_FIELDS = ('places.id,places.displayName,places.formattedAddress,places.googleMapsUri,'
+                   'places.attributions,places.location,places.utcOffsetMinutes')
+DETAIL_FIELDS = 'id,location,utcOffsetMinutes,currentOpeningHours.periods,googleMapsUri,attributions'
 QUERIES = {'museum': ('museums', 'museum'), 'park': ('parks', 'park'),
            'architecture': ('architectural landmarks', None)}
 GEO_TYPES = {'locality', 'sublocality', 'neighborhood', 'administrative_area_level_3',
@@ -65,6 +70,33 @@ def valid_rectangle(value):
     except (KeyError, TypeError): return False
 
 
+def coordinate(raw):
+    try:
+        return Coordinate(float(raw['latitude']), float(raw['longitude']))
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def opening_windows(raw, default_offset):
+    hours = raw.get('currentOpeningHours')
+    if not isinstance(hours, dict):
+        return (), False
+    result = []
+    zone = timezone(timedelta(minutes=int(raw.get('utcOffsetMinutes', default_offset) or 0)))
+    for period in hours.get('periods', []) or []:
+        try:
+            opened, closed = period['open'], period['close']
+            od, cd = opened['date'], closed['date']
+            start = datetime(od['year'], od['month'], od['day'], opened.get('hour', 0),
+                             opened.get('minute', 0), tzinfo=zone)
+            end = datetime(cd['year'], cd['month'], cd['day'], closed.get('hour', 0),
+                           closed.get('minute', 0), tzinfo=zone)
+            if end > start: result.append((start, end))
+        except (KeyError, TypeError, ValueError):
+            continue
+    return tuple(result), True
+
+
 class GoogleSource:
     mode = 'real'
     label = 'Google Maps — реальные места.'
@@ -110,6 +142,35 @@ class GoogleSource:
             except (ValueError, TypeError):
                 raise SourceError('Google вернул неподдерживаемый ответ. Выбор сохранён; попробуйте позже.') from None
 
+    async def _details(self, place_id, budget):
+        url = f'https://places.googleapis.com/v1/places/{quote(place_id, safe="")}'
+        for attempt in range(2):
+            budget.take()
+            try:
+                response = await asyncio.wait_for(self._client.get(url, headers={
+                    'X-Goog-Api-Key': self._key, 'X-Goog-FieldMask': DETAIL_FIELDS,
+                }), timeout=10)
+            except (httpx.TransportError, asyncio.TimeoutError):
+                if attempt == 0:
+                    await asyncio.sleep(self.retry_delay)
+                    continue
+                raise SourceError('Google не ответил вовремя. Выбор сохранён; попробуйте позже.') from None
+            if response.status_code in (500, 502, 503, 504) and attempt == 0:
+                await asyncio.sleep(self.retry_delay)
+                continue
+            if response.status_code in (401, 403):
+                raise SourceError('Google отклонил доступ. Администратору нужно проверить ключ, API и биллинг. Выбор сохранён.')
+            if response.status_code == 429:
+                raise SourceError('Лимит или квота Google исчерпаны. Попробуйте позже; выбор сохранён.')
+            if response.status_code != 200:
+                raise SourceError('Данные выбранного места сейчас недоступны. Выбор сохранён.')
+            try:
+                payload = response.json()
+                if not isinstance(payload, dict): raise ValueError()
+                return payload
+            except (ValueError, TypeError):
+                raise SourceError('Google вернул неподдерживаемый ответ. Выбор сохранён; попробуйте позже.') from None
+
     async def resolve_geo(self, text, budget):
         text = ' '.join(text.split())
         if not text or len(text) > 200:
@@ -145,5 +206,37 @@ class GoogleSource:
                     continue
                 result[id] = Place(id, (p.get('displayName') or {}).get('text') or 'Название не указано',
                                    geo.label, '', category, p.get('formattedAddress') or 'Адрес не указан',
-                                   safe_url(p.get('googleMapsUri')), credits(p), (category,))
+                                   safe_url(p.get('googleMapsUri')), credits(p), (category,),
+                                   coordinate(p.get('location') or {}))
         return tuple(result.values())[:15]
+
+    async def resolve_endpoint(self, text, geo, budget):
+        text = ' '.join(text.split())
+        if not text or len(text) > 200:
+            raise SourceError('Введите адрес или название точки (до 200 символов).')
+        body = {'textQuery': text, 'languageCode': 'ru', 'pageSize': 3,
+                'locationRestriction': {'rectangle': geo.rectangle}}
+        rows = await self._request(body, ENDPOINT_FIELDS, budget)
+        result = []
+        for item in rows:
+            point = coordinate(item.get('location') or {})
+            name = (item.get('displayName') or {}).get('text')
+            if not item.get('id') or not point or not name: continue
+            address = item.get('formattedAddress')
+            result.append(Endpoint(item['id'], f'{name} — {address}' if address else name, point,
+                                   int(item.get('utcOffsetMinutes') or 0),
+                                   safe_url(item.get('googleMapsUri')), credits(item)))
+        return tuple(result[:3])
+
+    async def enrich_selected(self, places, day, budget):
+        result = []
+        for place in places:
+            raw = await self._details(place.id, budget)
+            windows, known = opening_windows(raw, 0)
+            result.append(replace(place,
+                                  coordinate=coordinate(raw.get('location') or {}) or place.coordinate,
+                                  opening_windows=windows,
+                                  hours_known=known,
+                                  maps_url=safe_url(raw.get('googleMapsUri')) or place.maps_url,
+                                  attributions=tuple(dict.fromkeys((*place.attributions, *credits(raw))))))
+        return tuple(result)
