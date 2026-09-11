@@ -11,6 +11,8 @@ from .route_map import (
 class InputError(ValueError):
     pass
 
+SOURCE_NOTE = 'Места: Google Maps • время посещения: оценка бота'
+
 class Dialog:
     def __init__(self, source: PlaceSource = None, store=None, today_provider=None):
         self.source = source if source is not None else DemoSource()
@@ -210,14 +212,7 @@ class Dialog:
         def attribution(place):
             if place.maps_url: lines.append('Google Maps: ' + place.maps_url)
             lines.extend(place.attributions)
-        lines = [self.source.label]
-        if self.real:
-            lines.append('Данные мест: Google Maps. Оценки времени: бот.')
-            if s.geography:
-                lines += ['Поиск: ' + getattr(s.geography, 'label', s.city or 'выбранная территория'),
-                          'Территория — прямоугольник Google, не точная административная граница.']
-                lines.extend(getattr(s.geography, 'attributions', ()))
-            lines.append('Выдача ограничена: до 15 мест; не полный каталог. /terms /privacy')
+        lines = []
         if s.notice: lines.append(s.notice)
         if s.stage == 'day_date':
             lines += ['Введите дату маршрута в формате ГГГГ-ММ-ДД.', 'Доступны сегодня и следующие 7 дней.']
@@ -377,4 +372,5 @@ class Dialog:
         if self.saved_flow and s.stage in ('geo', 'planned'):
             button('Мои маршруты', 'routes')
         button('Новый подбор', 'new')
+        lines.append(SOURCE_NOTE if self.real else self.source.label)
         return '\n'.join(lines), rows

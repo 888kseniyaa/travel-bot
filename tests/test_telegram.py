@@ -98,6 +98,15 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('Мои маршруты', update.effective_message.reply_text.call_args.kwargs['text'])
         self.assertEqual(adapter.dialog.store.get((10, 1)).selected, {'draft': 45})
 
+    async def test_about_explains_data_and_controls(self):
+        adapter = Adapter()
+        update = self.update('/about')
+        await adapter.about(update, None)
+        text = update.effective_message.reply_text.call_args.kwargs['text']
+        for expected in ('Google Maps', 'оценка бота', 'прямоугольн', '15 мест',
+                         'перестраивает маршрут', '30 дней', '/terms', '/privacy'):
+            self.assertIn(expected, text)
+
     def test_application_builds_without_network(self):
         app = build_application('123456:TEST_ONLY_NOT_A_REAL_TOKEN')
         self.assertEqual(app.concurrent_updates, 1)

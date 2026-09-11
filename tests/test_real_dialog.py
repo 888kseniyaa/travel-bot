@@ -71,3 +71,14 @@ class RealDialogTests(unittest.IsolatedAsyncioTestCase):
         with patch('travel_bot.state.monotonic', return_value=s.expires + 1):
             with self.assertRaises(InputError): self.d.click(self.k, button)
             self.assertIsNone(self.d.store.get(self.k))
+
+    async def test_main_views_use_one_compact_source_note(self):
+        initial = self.d.view(self.k)[0]
+        note = 'Места: Google Maps • время посещения: оценка бота'
+        self.assertEqual(initial.count(note), 1)
+        self.assertLess(initial.index('Введите город'), initial.index(note))
+        await self.prepare()
+        places = self.d.view(self.k)[0]
+        self.assertEqual(places.count(note), 1)
+        self.assertNotIn('прямоугольник Google', places)
+        self.assertNotIn('Выдача ограничена', places)
